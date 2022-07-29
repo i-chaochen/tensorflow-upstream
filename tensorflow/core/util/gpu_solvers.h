@@ -293,7 +293,6 @@ class GpuSolver {
   Status GetrfBatched(int n, Scalar** dev_A, int lda, int* dev_pivots,
                       DeviceLapackInfo* info, const int batch_count);
 
-  // No GetrsBatched for HipSolver yet.
   template <typename Scalar>
   Status GetrsBatched(const rocblas_operation trans, int n, int nrhs,
                       Scalar** A, int lda, int* dev_pivots, Scalar** B,
