@@ -728,6 +728,7 @@ Status GpuSolver::forward_input_or_allocate_scoped_tensor(
   return status;
 }
 
+
 template <typename Scalar, typename SolverFnT>
 static inline Status TrsmImpl(GpuExecutor* gpu_executor, SolverFnT solver,
                               rocblas_handle rocm_blas_handle,
@@ -764,6 +765,60 @@ static inline Status TrsmImpl(GpuExecutor* gpu_executor, SolverFnT solver,
   }
 
 TF_CALL_LAPACK_TYPES_NO_COMPLEX(TRSM_INSTANCE);
+
+
+template <typename Scalar, typename SolverFnT>
+static inline Status TrsmBatchedImpl(
+    GpuExecutor* gpu_executor, SolverFnT solver, 
+    rocblas_handle rocm_blas_handle, rocblas_side side, rocblas_fill uplo,
+    rocblas_operation trans, rocblas_diagonal diag, int m, int n,
+    const Scalar* alpha, const Scalar* const host_a_dev_ptrs[], int lda,
+    Scalar* host_b_dev_ptrs[], int ldb, int batch_size) {
+  mutex_lock lock(handle_map_mutex);
+  using ROCmScalar = typename ROCmComplexT<Scalar>::type;
+
+  ScopedActivateExecutorContext sac{gpu_executor};
+
+  ScratchSpace<uint8> dev_a_dev_ptrs =
+      this->GetScratchSpace<uint8>(sizeof(ROCmScalar*) * batch_size, "",
+                                          /* on_host */ false);
+  ScratchSpace<uint8> dev_b_dev_ptrs =
+      this->GetScratchSpace<uint8>(sizeof(ROCmScalar*) * batch_size, "",
+                                          /* on_host */ false);
+  if (!CopyHostToDevice(context, dev_a_dev_ptrs.mutable_data() /* dest */,
+                        host_a_dev_ptrs /* source */, dev_a_dev_ptrs.bytes())) {
+    return errors::Internal("TrsmBatched: failed to copy pointers to device");
+  }
+  if (!CopyHostToDevice(context, dev_b_dev_ptrs.mutable_data() /* dest */,
+                        host_b_dev_ptrs /* source */, dev_b_dev_ptrs.bytes())) {
+    return errors::Internal("TrsmBatched: failed to copy pointers to device");
+  }
+  TF_RETURN_IF_ROCBLAS_ERROR(
+      solver(rocm_blas_handle, side, uplo, trans, diag, m, n,
+             reinterpret_cast<const ROCmScalar*>(alpha),
+             reinterpret_cast<const ROCmScalar* const*>(dev_a_dev_ptrs.data()),
+             lda, reinterpret_cast<ROCmScalar**>(dev_b_dev_ptrs.mutable_data()),
+             ldb, batch_size));
+  return OkStatus();
+}
+
+#define TRSM_BATCHED_INSTANCE(Scalar, type_prefix)                            \
+  template <>                                                                 \
+  Status GpuSolver::TrsmBatched(                                              \
+      rocblas_side side, rocblas_fill uplo, rocblas_operation trans,          \
+      rocblas_diagonal diag, int m, int n, const Scalar* alpha,               \
+      const Scalar* const dev_Aarray[], int lda, Scalar* dev_Barray[],        \
+      int ldb, int batch_size) {                                              \
+    GpuExecutor* gpu_executor = static_cast<GpuExecutor*>(                    \
+        context_->op_device_context()->stream()->parent()->implementation()); \      
+    return TrsmBatchedImpl(gpu_executor,                                      \
+                           BLAS_SOLVER_FN(trsmBatched, type_prefix),          \
+                           rocm_blas_handle_, side, uplo, trans,              \
+                           diag, m, n, alpha, dev_Aarray, lda, dev_Barray,    \
+                           ldb, batch_size);                                  \
+  }
+  TF_CALL_LAPACK_TYPES(TRSM_BATCHED_INSTANCE);
+
 
 template <typename Scalar, typename SolverFnT>
 Status MatInvBatchedImpl(GpuExecutor* gpu_executor, SolverFnT solver,
