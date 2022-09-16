@@ -117,6 +117,7 @@ Status GpuLaunchKernel(void (*function)(Ts...), dim3 grid_dim, dim3 block_dim,
 #elif TENSORFLOW_USE_ROCM
   hipLaunchKernelGGL(function, grid_dim, block_dim, shared_memory_size_bytes,
                      stream, std::forward<Args>(arguments)...);
+  TF_CHECK_OK(hipGetLastError());
 #endif
   return OkStatus();
 }
