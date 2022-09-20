@@ -30,7 +30,7 @@ def THLO_Dialect : Dialect {
   let name = "thlo";
   let cppNamespace = "::mlir::thlo";
 
-  let emitAccessorPrefix = kEmitAccessorPrefix_Raw;
+  let emitAccessorPrefix = kEmitAccessorPrefix_Prefixed;
 }
 
 class THLO_Op<string mnemonic, list<Trait> traits> :
@@ -50,9 +50,9 @@ class THLO_DstStyleOp<string mnemonic, list<Trait> traits> : THLO_Op<mnemonic, [
 }
 
 def THLO_YieldOp : THLO_Op<"yield", [NoSideEffect, ReturnLike, Terminator,
-    ParentOneOf<["MapOp", "ReductionOp"]>]>,
+    ParentOneOf<["MapOp", "ReductionOp", "ScatterOp"]>]>,
     Arguments<(ins Variadic<AnyType>:$values)> {
-  let summary = "Yield operation for thlo.map and thlo.reduce.";
+  let summary = "Yield operation for tHLO ops with regions.";
   let assemblyFormat = "attr-dict $values `:` type($values)";
   let hasVerifier = 1;
 }
@@ -71,8 +71,8 @@ def THLO_ConcatenateOp : THLO_DstStyleOp<"concatenate", [
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
     // Implement functions necessary for DestinationStyleOpInterface.
-    mlir::ValueRange inputs() { return operands(); }
-    mlir::ValueRange getInputs() { return operands(); }
+    mlir::ValueRange inputs() { return getOperands().drop_back(1); }
+    mlir::ValueRange getInputs() { return getOperands().drop_back(1); }
     mlir::ValueRange outputs() { return getOperands().take_back(1); }
   }];
 }
@@ -134,12 +134,12 @@ def THLO_GatherOp : THLO_DstStyleOp<"gather", [
 }
 
 def THLO_ScatterOp : THLO_DstStyleOp<"scatter", [
-    DeclareOpInterfaceMethods<TilingInterface>]> {
+    DeclareOpInterfaceMethods<TilingInterface>,
+    SingleBlockImplicitTerminator<"YieldOp">]> {
   let summary = "Destination-style twin for `mhlo.scatter`";
   let description = [{
     Caveats:
     - the variadic case is not supported.
-    - update_computation is sum.
     - Only point updates are supported
       - update_window_dims is []
       - inserted_window_dims is range(operand.shape.rank)
@@ -154,6 +154,8 @@ def THLO_ScatterOp : THLO_DstStyleOp<"scatter", [
     TensorOrMemref:$init
   );
   let results = (outs Variadic<AnyTensor>:$result);
+
+  let regions = (region SizedRegion<1>:$update_computation);
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
     // Implement functions necessary for DestinationStyleOpInterface.
@@ -233,10 +235,10 @@ def THLO_ReductionOp : THLO_DstStyleOp<"reduction", [
 
   let extraClassDeclaration = [{
     // Implement functions necessary for DestinationStyleOpInterface.
-    mlir::ValueRange getInputs() { return inputs(); }
-    mlir::ValueRange outputs() { return inits(); }
-    unsigned getNumInputs() { return inputs().size(); };
-    unsigned getNumOutputs() { return inits().size(); };
+    mlir::ValueRange inputs() { return getInputs(); }
+    mlir::ValueRange outputs() { return getInits(); }
+    unsigned getNumInputs() { return getInputs().size(); };
+    unsigned getNumOutputs() { return getInits().size(); };
   }];
 }
 
@@ -273,7 +275,7 @@ def THLO_MapOp : THLO_DstStyleOp<"map", [
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
     // Implement functions necessary for DestinationStyleOpInterface.
-    mlir::ValueRange getInputs() { return inputs(); }
+    mlir::ValueRange inputs() { return getInputs(); }
     mlir::ValueRange outputs() { return getOperands().take_back(1); }
   }];
 }

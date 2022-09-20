@@ -23,15 +23,19 @@ include "mlir-hlo/Dialect/gml_st/IR/gml_st_ops_base.td"
 include "mlir-hlo/Dialect/gml_st/IR/gml_st_set_ops.td"
 include "mlir-hlo/Dialect/gml_st/IR/gml_st_legacy_ops.td"
 
-def GMLST_MaterializeOp : GMLST_Op<"materialize", [
-    NoSideEffect,
-    DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyShaped:$source, AnySet:$set);
-  let results = (outs AnyType:$result);
+def RankedTensor : AnyTypeOf<[AnyRankedTensor], "", "::mlir::RankedTensorType">;
+def RankedTensorOrScalar : AnyTypeOf<[AnyRankedTensor, AnyFloat, AnyInteger]>;
+
+def GMLST_MaterializeOp : GMLST_Op<"materialize", [NoSideEffect]> {
+  let arguments = (ins RankedTensor:$source, AnySet:$set);
+  let results = (outs RankedTensorOrScalar:$result);
+
+  let builders = [OpBuilder<(ins "Value":$source, "Value":$set)>];
+
   let assemblyFormat = [{
     $source`[` $set `]` attr-dict `:` type($source) `[` type($set) `]`
+      `to` type($result)
   }];
-  let hasVerifier = 0;
 }
 
 def GMLST_OffsetOp : GMLST_Op<"offset", [NoSideEffect]> {
@@ -91,7 +95,7 @@ class GMLST_LoopLikeOp<string mnemonic, list<Trait> traits = []>
 
   code extraBaseClassDeclaration = [{
     /// Number of loops
-    unsigned getNumLoops() { return step().size(); }
+    unsigned getNumLoops() { return getStep().size(); }
 
     /// Number of operands controlling the loop: lbs, ubs, steps
     unsigned getNumControlOperands() { return 3 * getNumLoops(); }
@@ -215,7 +219,7 @@ def GMLST_ForOp : GMLST_LoopLikeOp<"for", []> {
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
     /// Number of output operands
-    unsigned getNumOutputs() { return outputs().size(); }
+    unsigned getNumOutputs() { return getOutputs().size(); }
 
     /// Get the region output args.
     Block::BlockArgListType getRegionOutputArgs() {
@@ -278,9 +282,9 @@ def GMLST_SetYieldOp : GMLST_Op<"set_yield", [NoSideEffect, ReturnLike,
       : tensor<4x4xf32> into tensor<16x64xf32>[!gml_st.tile<4x4>]
     ```
   }];
-  let arguments = (ins Variadic<AnyType>:$srcs,
-                       Variadic<AnyType>:$dsts,
-                       Variadic<AnyType>:$sets,
+  let arguments = (ins Variadic<RankedTensorOrScalar>:$srcs,
+                       Variadic<RankedTensor>:$dsts,
+                       Variadic<AnySet>:$sets,
                        BoolArrayAttr:$accumulatorFlags);
   let regions = (region VariadicRegion<SizedRegion<1>>:$accumulators);
   let hasCustomAssemblyFormat = 1;
@@ -301,7 +305,7 @@ def GMLST_SetYieldOp : GMLST_Op<"set_yield", [NoSideEffect, ReturnLike,
 
   let extraClassDeclaration = [{
 
-    unsigned getNumUpdates() { return srcs().size(); }
+    unsigned getNumUpdates() { return getSrcs().size(); }
 
     // Methods for `srcs` arguments.
     OpOperand* getSrcOperand(unsigned i) {

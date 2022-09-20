@@ -74,18 +74,19 @@ tensorflow::Status GraphToFunc(GraphOp graph, ArrayRef<Value> feeds,
   auto loc = graph.getLoc();
   auto func_op = builder.create<GraphFuncOp>(loc, func_name, func_type,
                                              /*generic=*/false);
-  func_op->setAttr("tfg.lifted_graph_version", graph.version());
+  func_op->setAttr("tfg.lifted_graph_version", graph.getVersion());
   func_op.getRegion().takeBody(graph.getRegion());
 
   // Create the returnOp first so that if there are nodes in both feeds and
   // fetches, the fetch value will be replaced with feed argument.
-  OpBuilder body_builder = OpBuilder::atBlockEnd(func_op.getBody());
+  OpBuilder body_builder =
+      OpBuilder::atBlockEnd(func_op.SingleBlock::getBody());
   body_builder.create<ReturnOp>(loc, fetches, control_rets);
 
   StringAttr tfg_name = dialect->getTfgNameAttrIdentifier();
   StringAttr lifted_value_name = builder.getStringAttr("tfg.lifted_value_attr");
 
-  Block *body = func_op.getBody();
+  Block *body = func_op.SingleBlock::getBody();
   llvm::SmallVector<Attribute> args_rets_attrs;
   for (Value feed : feeds) {
     feed.replaceAllUsesWith(body->addArgument(feed.getType(), loc));

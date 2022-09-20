@@ -633,7 +633,6 @@ cc_library(
         "//tensorflow/core/kernels/linalg:linalg",
         "//tensorflow/core/kernels/image:image",
         "//tensorflow/core/kernels/sparse:kernels",
-        "//tensorflow/dtensor/cc:dtensor_kernels",
     ] + if_mkl([
         "//tensorflow/core/kernels/mkl:mkl_aggregate_ops",
         "//tensorflow/core/kernels/mkl:mkl_concat_op",
@@ -1811,7 +1810,6 @@ cc_library(
     hdrs = [
         "//tensorflow/core/lib/gtl:legacy_lib_test_internal_headers",
         "//tensorflow/core/lib/io:legacy_lib_test_internal_headers",
-        "//tensorflow/core/lib/random:legacy_lib_test_internal_headers",
     ],
     deps = [
         ":lib",
@@ -1822,7 +1820,7 @@ cc_library(
 # Main program for tests
 alias(
     name = "test_main",
-    actual = "//tensorflow/core/platform:test_main",
+    actual = "//tensorflow/tsl/platform:test_main",
     visibility = ["//tensorflow:internal"],
 )
 
@@ -1832,7 +1830,6 @@ tf_cc_tests(
     srcs = [
         "//tensorflow/core/lib/core:legacy_lib_core_all_tests",
         "//tensorflow/core/lib/gtl:legacy_lib_gtl_tests",
-        "//tensorflow/core/lib/hash:legacy_lib_hash_all_tests",
         "//tensorflow/core/lib/histogram:legacy_lib_histogram_all_tests",
         "//tensorflow/core/lib/io:legacy_lib_io_all_tests",
         "//tensorflow/core/lib/monitoring:collection_registry_test.cc",
@@ -1841,7 +1838,6 @@ tf_cc_tests(
         "//tensorflow/core/lib/monitoring:metric_def_test.cc",
         "//tensorflow/core/lib/monitoring:percentile_sampler_test.cc",
         "//tensorflow/core/lib/monitoring:sampler_test.cc",
-        "//tensorflow/core/lib/random:legacy_lib_random_tests",
         "//tensorflow/core/lib/strings:legacy_low_level_library_tests",
         "//tensorflow/core/lib/wav:wav_io_test.cc",
         "//tensorflow/tsl/lib/core:legacy_lib_core_all_tests",
@@ -1893,21 +1889,6 @@ tf_cc_tests(
 )
 
 tf_cc_test(
-    name = "lib_random_random_distributions_test",
-    srcs = ["//tensorflow/core/lib/random:legacy_lib_random_random_distributions_test"],
-    tags = ["optonly"],
-    deps = [
-        ":lib",
-        ":lib_internal",
-        ":lib_test_internal",
-        ":protos_all_cc",
-        ":test",
-        ":test_main",
-        "//third_party/eigen3",
-    ],
-)
-
-tf_cc_test(
     name = "lib_strings_ordered_code_test",
     srcs = ["//tensorflow/core/lib/strings:legacy_strings_ordered_code_test"],
     extra_copts = ["$(STACK_FRAME_UNLIMITED)"],  # Tests initialize large vectors
@@ -1930,18 +1911,6 @@ tf_cc_test(
         ":test",
         ":test_main",
         "@com_google_absl//absl/memory",
-    ],
-)
-
-tf_cc_test(
-    name = "lib_random_weighted_picker_test",
-    size = "medium",
-    srcs = ["//tensorflow/core/lib/random:legacy_lib_random_random_weighted_picker_test"],
-    deps = [
-        ":lib",
-        ":lib_internal",
-        ":test",
-        ":test_main",
     ],
 )
 

@@ -2724,9 +2724,12 @@ Status AlgebraicSimplifierVisitor::HandleDot(HloInstruction* dot) {
         dot, HloInstruction::CreateBroadcast(dot->shape(), zero, {}));
   }
 
+  const bool is_packed_nibble =
+      absl::c_linear_search(dot->precision_config().operand_precision(),
+                            PrecisionConfig::PACKED_NIBBLE);
   // If there are no contracting dimensions, a dot can be rewritten as
   // mul(broadcast(transpose(x)),broadcast(transpose(y)))
-  if (options_.enable_dot_to_multiply_rewrite() &&
+  if (!is_packed_nibble && options_.enable_dot_to_multiply_rewrite() &&
       dnums.lhs_contracting_dimensions_size() == 0) {
     TF_ASSIGN_OR_RETURN(HloInstruction * new_lhs,
                         NormalizeDotOperandToBatchMajorAndContractingMinor(
@@ -2765,7 +2768,7 @@ Status AlgebraicSimplifierVisitor::HandleDot(HloInstruction* dot) {
 
   // If the lhs or rhs have only batch and contracting dimensions, a dot can be
   // rewritten as reduce(mul(broadcast(transpose(x)),broadcast(transpose(y))))
-  if (options_.enable_dot_strength_reduction() &&
+  if (!is_packed_nibble && options_.enable_dot_strength_reduction() &&
       ((dnums.lhs_batch_dimensions_size() +
             dnums.lhs_contracting_dimensions_size() ==
         lhs->shape().rank()) ||
@@ -4588,6 +4591,23 @@ Status AlgebraicSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
   return OkStatus();
 }
 
+int64_t CountElementsLessThan(absl::Span<const int64_t> elements,
+                              int64_t value) {
+  int64_t low = 0;
+  int64_t high = elements.size() - 1;
+  int64_t count = 0;
+  while (low <= high) {
+    int64_t mid = low + (high - low) / 2;
+    if (elements.at(mid) < value) {
+      count = mid + 1;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return count;
+}
+
 Status AlgebraicSimplifierVisitor::HandleReverse(HloInstruction* reverse) {
   // When all the dimensions to reverse are trivial (i.e. the bound is 1),
   // there is nothing to be done.
@@ -4596,6 +4616,93 @@ Status AlgebraicSimplifierVisitor::HandleReverse(HloInstruction* reverse) {
   };
   if (absl::c_all_of(reverse->dimensions(), dim_is_one)) {
     return ReplaceInstruction(reverse, reverse->mutable_operand(0));
+  }
+  if (!options_.is_layout_sensitive()) {
+    absl::Span<const int64_t> reverse_dims = reverse->dimensions();
+    HloInstruction* inner = reverse->mutable_operand(0);
+    HloOpcode inner_opcode = inner->opcode();
+    // handling nested reverse
+    // if two reverses are identical, both are removed, otherwise the
+    // intersection of the dimensions of two reverses are removed
+    if (inner_opcode == HloOpcode::kReverse) {
+      absl::c_sort(*(reverse->mutable_dimensions()));
+      absl::c_sort(*(inner->mutable_dimensions()));
+      std::vector<int64_t> sym_diff, uni, intersect;
+      absl::c_set_union(reverse_dims, inner->dimensions(),
+                        std::back_inserter(uni));
+      absl::c_set_intersection(reverse_dims, inner->dimensions(),
+                               std::back_inserter(intersect));
+      absl::c_set_difference(uni, intersect, std::back_inserter(sym_diff));
+      if (sym_diff.empty()) {
+        return ReplaceInstruction(reverse, inner->mutable_operand(0));
+      }
+      absl::Span<const int64_t> new_dimensions = absl::MakeConstSpan(sym_diff);
+      return ReplaceInstruction(
+          reverse, MakeReverseHlo(inner->mutable_operand(0), new_dimensions)
+                       .ValueOrDie());
+    }
+    // reverse(ElementWiseBinOp(x, constant)) ==>
+    // ElementWiseBinOp(reverse(x), constant)
+    // element-wise binary op inside reverse can be brought out
+    if (inner->IsElementwiseBinary() && inner->HasConstantOperand()) {
+      // produces incorrect result for rng.
+      if (inner->opcode() == HloOpcode::kRng) {
+        return OkStatus();
+      }
+      HloInstruction* cons;
+      HloInstruction* hlo;
+      if (inner->mutable_operand(0)->IsConstant()) {
+        cons = inner->mutable_operand(0);
+        hlo = inner->mutable_operand(1);
+        return ReplaceWithNewInstruction(
+            reverse, HloInstruction::CreateBinary(
+                         inner->shape(), inner_opcode, cons,
+                         MakeReverseHlo(hlo, reverse_dims).ValueOrDie()));
+      } else {
+        cons = inner->mutable_operand(1);
+        hlo = inner->mutable_operand(0);
+        return ReplaceWithNewInstruction(
+            reverse, HloInstruction::CreateBinary(
+                         inner->shape(), inner_opcode,
+                         MakeReverseHlo(hlo, reverse_dims).ValueOrDie(), cons));
+      }
+    }
+    // reverse(DegenerateDimensionAddingReshape(x)) ==>
+    // DegenerateDimensionAddingReshape(reverse(x))
+    // degenerate adding reshape inside a reverse can be brought out
+    if (inner_opcode == HloOpcode::kReshape) {
+      Shape* inner_shape = inner->mutable_shape();
+      // degenerate adding reshape check
+      std::optional<ShapeUtil::ShapeEqualityDescriptor> reshape_degenerate =
+          inner->ReshapeMerelyInsertsOrDeletes1SizedDimensions();
+      if (reshape_degenerate.has_value() &&
+          reshape_degenerate->deleted_dimensions.empty()) {
+        std::vector<int64_t> new_reverse_dims;
+        // for each reverse dimension dim, count the number of degenerate
+        // dimensions that are added 'before' dim by the reshape operation.
+        for (auto dim : reverse_dims) {
+          // trivial dimensions don't need to be reversed.
+          if (inner_shape->dimensions(dim) == 1) {
+            continue;
+          }
+          auto new_dim =
+              dim -
+              CountElementsLessThan(
+                  absl::MakeConstSpan(reshape_degenerate->inserted_dimensions),
+                  dim);
+          new_reverse_dims.push_back(new_dim);
+        }
+
+        return ReplaceInstruction(
+            reverse,
+            MakeReshapeHlo(
+                *inner_shape,
+                MakeReverseHlo(reverse->mutable_operand(0)->mutable_operand(0),
+                               new_reverse_dims)
+                    .ValueOrDie())
+                .ValueOrDie());
+      }
+    }
   }
   return OkStatus();
 }
@@ -6859,7 +6966,9 @@ StatusOr<bool> AlgebraicSimplifierVisitor::SimplifyConvToDot(
 
 StatusOr<bool> AlgebraicSimplifierVisitor::SimplifyConvToMultiply(
     HloInstruction* convolution) {
-  if (options_.is_layout_sensitive()) {
+  if (options_.is_layout_sensitive() ||
+      absl::c_linear_search(convolution->precision_config().operand_precision(),
+                            PrecisionConfig::PACKED_NIBBLE)) {
     return false;
   }
 

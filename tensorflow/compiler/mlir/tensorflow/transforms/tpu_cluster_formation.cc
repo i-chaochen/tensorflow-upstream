@@ -151,7 +151,18 @@ LogicalResult CollectAndGroupClusterOps(Block* block, ClusterMap* clusters,
     // (checked later).
     auto device_type_attr =
         op.getAttrOfType<StringAttr>(TF::kCompileDeviceTypeAttr);
-    if (device_type_attr) device_types.insert(device_type_attr);
+    if (device_type_attr) {
+      // Some graphs in TPU bridge may have both tf.StatefulPartitionedCall
+      // ops with and without _tpu_replicate attributes. As a result, the ops
+      // without such attribute would have _xla_compile_device_type="" after
+      // CanonicalizeCompileAndReplicateAttributesPass, if they also had
+      // _XlaMustCompile = true before the pass. We should filter out such
+      // unspecified device type here.
+      if (device_type_attr.getValue().empty()) continue;
+      device_types.insert(device_type_attr);
+      // Stop here for ops with non-TPU devices, they are handled elsewhere.
+      if (device_type_attr.getValue() != TF::kTpuDevice) continue;
+    }
 
     if (op.hasAttr(TF::kReplicationInfoAttr)) {
       // For replicated case, borrow cluster structure from replication info.
@@ -377,7 +388,7 @@ tf_device::ClusterOp CreateClusterOp(
                                                       result_types);
 
   Block* body = new Block;
-  cluster.body().push_back(body);
+  cluster.getBody().push_back(body);
 
   // Move cluster ops to the cluster body. Also remove `_replication_info` and
   // `device` attribute from ops in the cluster when that information is
@@ -440,7 +451,7 @@ LogicalResult ReplicateCluster(tf_device::ClusterOp cluster, int num_replicas,
   llvm::SmallVector<TF::TPUReplicatedInputOp, 8> replicated_input_ops;
   llvm::SmallSet<TF::TPUReplicatedInputOp, 8> seen_ops;
   mlir::visitUsedValuesDefinedAbove(
-      cluster.body(), cluster.body(), [&](mlir::OpOperand* operand) {
+      cluster.getBody(), cluster.getBody(), [&](mlir::OpOperand* operand) {
         Operation* def = operand->get().getDefiningOp();
         if (auto ri = llvm::dyn_cast_or_null<TF::TPUReplicatedInputOp>(def)) {
           if (!seen_ops.contains(ri)) {
@@ -559,7 +570,7 @@ LogicalResult ReplicateCluster(tf_device::ClusterOp cluster, int num_replicas,
     TF::TPUReplicatedInputOp input = std::get<0>(input_and_block_arg);
     Value block_arg = std::get<1>(input_and_block_arg);
     mlir::replaceAllUsesInRegionWith(input->getResult(0), block_arg,
-                                     cluster.body());
+                                     cluster.getBody());
     // Update replicated input use in tf.TPUPartitionedInput op.
     for (auto& use : input->getUses()) {
       auto pi = llvm::dyn_cast<TF::TPUPartitionedInputOp>(use.getOwner());

@@ -37,7 +37,6 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
-#include "tensorflow/compiler/mlir/xla/transforms/tf_xla_passes_detail.h"
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/client/sharding_builder.h"
 #include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
@@ -56,13 +55,16 @@ constexpr char kFrontendAttributesAttr[] = "mhlo.frontend_attributes";
 // TPU core that sends to and receives from host.
 constexpr int64_t kShardingTpuCore = 0;
 
+#define GEN_PASS_DEF_LEGALIZETFCOMMUNICATIONPASS
+#include "tensorflow/compiler/mlir/xla/transforms/tf_xla_passes.h.inc"
+
 // A pass that legalizes TF/XLA communication ops, propagate their respective
 // tokens (for ordering), and rewrite their respective functions and control
 // flow ops when necessary.
 // Note, this currently does not handle nested modules/functions or region based
 // ops other than certain control flow ops (`mhlo.if`, `mhlo.while`).
 class LegalizeTFCommunication
-    : public LegalizeTFCommunicationPassBase<LegalizeTFCommunication> {
+    : public impl::LegalizeTFCommunicationPassBase<LegalizeTFCommunication> {
   void runOnOperation() override;
 };
 
@@ -569,7 +571,7 @@ void RewriteControlFlowTerminator(OpBuilder& builder, Operation* terminator,
   // `mhlo.while` cond terminator does not need to be rewritten as it always
   // returns a tensor<i1> predicate value.
   if (auto while_parent = dyn_cast_or_null<WhileOp>(terminator->getParentOp()))
-    if (terminator->getParentRegion() == &while_parent.cond()) return;
+    if (terminator->getParentRegion() == &while_parent.getCond()) return;
 
   builder.setInsertionPoint(terminator);
   llvm::SmallDenseMap<Value, Value> rewritten_operands;
@@ -594,11 +596,11 @@ void RewriteRegionIfOp(OpBuilder& builder, IfOp region_if,
 
   // Create new `mhlo.if` op with extra token operands and result.
   auto new_if = builder.create<IfOp>(region_if.getLoc(), new_result_types,
-                                     region_if.pred());
+                                     region_if.getPred());
 
   // Move all regions from the old `mhlo.if` op to its replacement.
-  new_if.true_branch().takeBody(region_if.true_branch());
-  new_if.false_branch().takeBody(region_if.false_branch());
+  new_if.getTrueBranch().takeBody(region_if.getTrueBranch());
+  new_if.getFalseBranch().takeBody(region_if.getFalseBranch());
 
   // Forward result from old `mhlo.if` with replacement.
   SmallVector<Value> old_if_results = region_if.getResults();
@@ -722,8 +724,8 @@ void RewriteRegionWhileOp(OpBuilder& builder, WhileOp region_while,
                                            new_result_types, new_val_operands);
 
   // Move all regions from the old `mhlo.while` op to its replacement.
-  new_while.cond().takeBody(region_while.cond());
-  new_while.body().takeBody(region_while.body());
+  new_while.getCond().takeBody(region_while.getCond());
+  new_while.getBody().takeBody(region_while.getBody());
 
   // Forward result from old `mhlo.while` with replacement.
   SmallVector<Value> old_while_results = region_while.getResults();
@@ -758,7 +760,7 @@ bool ProcessRegionWhileOp(
 
   if (*region_idx < region_while.getNumRegions()) {
     SmallVector<Type> operand_types;
-    for (auto operand : region_while.operand())
+    for (auto operand : region_while.getOperand())
       operand_types.push_back(operand.getType());
     RewriteControlFlowOpRegion(builder, region_while, *region_idx,
                                operand_types, ops_to_visit, control_flow_blocks,

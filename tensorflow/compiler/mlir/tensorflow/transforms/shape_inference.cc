@@ -63,6 +63,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/dynamic_shape_utils.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/serialize_mlir_module_utils.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/shape_inference_utils.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/translate_utils.h"
@@ -546,14 +547,14 @@ Attribute ComputeOutputComponent(const ValuePort& value_port,
   if (auto graph = dyn_cast<tf_executor::GraphOp>(op)) {
     if (port.size() == 1)
       return ComputeOutputComponent(
-          ValuePort(graph.GetFetch().fetches()[port[0]]), values);
+          ValuePort(graph.GetFetch().getFetches()[port[0]]), values);
     return nullptr;
   }
 
   if (auto island = dyn_cast<tf_executor::IslandOp>(op)) {
     if (port.size() == 1)
       return ComputeOutputComponent(
-          ValuePort(island.GetYield().fetches()[port[0]]), values);
+          ValuePort(island.GetYield().getFetches()[port[0]]), values);
     return nullptr;
   }
 
@@ -1931,16 +1932,18 @@ bool ShapeInference::RefineShapeForPassThroughOps(Operation* op) {
 
 bool ShapeInference::InferShapeForNonTFDialectOperation(Operation* op) {
   if (auto graph_op = dyn_cast<tf_executor::GraphOp>(op)) {
-    return RefineTypeForPassThroughOperands(
-        graph_op.GetFetch(), graph_op.GetFetch().fetches(), op->getResults());
+    return RefineTypeForPassThroughOperands(graph_op.GetFetch(),
+                                            graph_op.GetFetch().getFetches(),
+                                            op->getResults());
   }
   if (auto island_op = dyn_cast<tf_executor::IslandOp>(op)) {
-    return RefineTypeForPassThroughOperands(
-        island_op.GetYield(), island_op.GetYield().fetches(), op->getResults());
+    return RefineTypeForPassThroughOperands(island_op.GetYield(),
+                                            island_op.GetYield().getFetches(),
+                                            op->getResults());
   }
   if (auto iter_sink = dyn_cast<tf_executor::NextIterationSinkOp>(op)) {
     auto iter_source = cast<tf_executor::NextIterationSourceOp>(
-        iter_sink.token().getDefiningOp());
+        iter_sink.getToken().getDefiningOp());
     return RefineTypeForPassThroughOperands(
         op, iter_sink.getOperands().drop_front().take_front(),
         iter_source.getResults());
@@ -2165,12 +2168,13 @@ bool ShapeInference::InferShapeForSingleOperation(Operation* op,
 
     ShapedTypeComponents inferred = std::get<1>(result);
     TensorType inferred_type;
-    if (inferred.hasRank())
-      inferred_type =
-          RankedTensorType::get(inferred.getDims(), inferred.getElementType());
-    else
-      inferred_type = UnrankedTensorType::get(inferred.getElementType());
+    if (inferred.hasRank()) {
+      inferred_type = tensorflow::GetTypeFromTFTensorShape(
+          inferred.getDims(), inferred.getElementType());
 
+    } else {
+      inferred_type = UnrankedTensorType::get(inferred.getElementType());
+    }
     inferred_type =
         TypeMeet(op_result.getType(), inferred_type).cast<TensorType>();
     if (op_result.getType() == inferred_type) continue;

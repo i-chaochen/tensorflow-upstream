@@ -212,7 +212,7 @@ TEST(TRT_ShapedWeights_Test, Basic) {
     TrtWeightStore store;
     TRT_ShapedWeights weights =
         store.GetTempWeights(nvinfer1::DataType::kFLOAT, CreateDims({2, 5}))
-            .ValueOrDie();
+            .value();
     TRT_ShapedWeights copy(weights);
     for (auto ptr : {&weights, &copy}) {
       nvinfer1::Weights trt_weights = ptr->GetTrtWeights();
@@ -526,7 +526,7 @@ class ConverterTest : public ::testing::Test {
                                     /*use_implicit_batch=*/true,
                                     /*engine_name=*/"TRTEngineOp_000_000",
                                     /*use_explicit_precision=*/false)
-                      .ValueOrDie());
+                      .value());
     weight_store_ = &converter_->weight_store_;
   }
 
@@ -741,7 +741,7 @@ void TestPrepareTensorForShape(
     input = TRT_TensorOrWeights(
         weight_store
             ->GetTempWeights(nvinfer1::DataType::kFLOAT, CreateDims(input_dims))
-            .ValueOrDie());
+            .value());
   }
   ITensorProxyPtr output_tensor = nullptr;
 
@@ -854,7 +854,7 @@ void TestGetWeightRange(ConverterTest* test, TrtWeightStore* weight_store) {
   nvinfer1::DataType trt_type;
   TF_ASSERT_OK(TfTypeToTrtType(DataTypeToEnum<T>::v(), &trt_type));
   TRT_ShapedWeights weights =
-      weight_store->GetTempWeights(trt_type, CreateDims({2, 3})).ValueOrDie();
+      weight_store->GetTempWeights(trt_type, CreateDims({2, 3})).value();
   const std::vector<T> values = {T(3), T(1), T(2), T(6), T(5), T(4)};
   absl::c_copy(values, weights.GetPointer<T>());
   float out_min = 0.0f;
@@ -896,7 +896,7 @@ TEST_F(ConverterTest, MaybeApplyQuantizationRanges) {
                                           /*use_calibration=*/true, &logger,
                                           /*use_implicit_batch=*/true,
                                           /*engine_name=*/"")
-                            .ValueOrDie();
+                            .value();
   int8_converter->ProvideQuantizationRange(&input, -5.0f, 5.0f);
   int8_converter->ProvideQuantizationRange(&not_infer, -100.0f, 100.0f);
 
@@ -1015,8 +1015,7 @@ TEST_F(ConverterTest, GetTrtBroadcastShape) {
 TEST_F(ConverterTest, CreateConstantLayer) {
   for (auto dtype : {nvinfer1::DataType::kFLOAT, nvinfer1::DataType::kINT32}) {
     TRT_ShapedWeights weights =
-        weight_store_->GetTempWeights(dtype, CreateDims({2, 3, 5}))
-            .ValueOrDie();
+        weight_store_->GetTempWeights(dtype, CreateDims({2, 3, 5})).value();
     ITensorProxyPtr tensor =
         converter_->CreateConstantLayer(weights, CreateDims({3, 10}));
     ASSERT_NE(nullptr, tensor->trt_tensor());
@@ -1157,7 +1156,7 @@ class OpConverterTest : public ::testing::Test {
                                         TrtTestMode::kImplicitBatch,
                                     /*engine_name=*/"",
                                     /*use_explicit_precision=*/false, ctx)
-                      .ValueOrDie());
+                      .value());
 
     // Reset other related artifacts.
     scope_ = Scope::NewRootScope();
@@ -4389,8 +4388,8 @@ TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
     const int32 max_total_size;
     const float iou_threshold;
     const float score_threshold;
-    bool pad_per_class;
-    bool clip_boxes;
+    const bool pad_per_class;
+    const bool clip_boxes;
     const std::vector<std::vector<int32>> expected_output_dims;
     const std::vector<float> exp_boxes;
     const std::vector<float> exp_scores;
@@ -4400,10 +4399,11 @@ TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
     Status runtime_status;
   };
 
+#if IS_TRT_VERSION_GE(8, 2, 1, 6) || defined(TF_TRT_USE_EFFICIENT_NMS_PLUGIN)
   Status conv_status =
       trt_mode_ == TrtTestMode::kImplicitBatch
-          ? errors::Unimplemented(
-                "Implict batch mode not supported with CombinedNMS")
+          ? errors::Unimplemented(convert_not_supported_implicit(
+                "CombinedNonMaxSuppression", "my_nms"))
           : Status::OK();
 
   std::vector<TestParams> params = {
@@ -4524,82 +4524,7 @@ TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
           {2},     // exp_num_detections
           conv_status},
   };
-
-  for (auto p : params) {
-    Reset();
-    SCOPED_TRACE(p.description);
-    AddTestTensor("boxes", p.boxes_tensor_dims, p.boxes_values);
-    AddTestTensor("scores", p.scores_tensor_dims, p.scores_values);
-    AddTestWeights<int32>("max_output_size_per_class", {1},
-                          {p.max_output_size_per_class});
-    AddTestWeights<int32>("max_total_size", {1}, {p.max_total_size});
-    AddTestWeights<float>("iou_threshold", {1}, {p.iou_threshold}, tf_type_);
-    AddTestWeights<float>("score_threshold", {1}, {p.score_threshold},
-                          tf_type_);
-
-    auto node_def = get_nms_nodedef(tf_type_, p.clip_boxes, p.pad_per_class);
-
-    TestOpConverterMultiOut(node_def, p.expected_output_dims,
-                            p.conversion_status, p.runtime_status,
-                            {
-                                ElementsAreArray(p.exp_boxes),
-                                ElementsAreArray(p.exp_scores),
-                                ElementsAreArray(p.exp_classes),
-                                ElementsAreArray(p.exp_num_detections),
-                            },
-                            {tf_type_, tf_type_, tf_type_, DT_INT32});
-  }
-}
-
-#elif IS_TRT_VERSION_GE(7, 1, 3, 0)
-
-TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
-  // Get the NodeDef for CombinedNMS.
-  auto get_nms_nodedef = [](DataType tf_type, bool clip_boxes = true,
-                            bool pad_per_class = false) -> NodeDef {
-    Scope s = Scope::NewRootScope();
-    auto boxes_tensor = ops::Placeholder(s.WithOpName("boxes"), tf_type);
-    auto scores_tensor = ops::Placeholder(s.WithOpName("scores"), tf_type);
-    auto max_output_size_per_class =
-        ops::Placeholder(s.WithOpName("max_output_size_per_class"), DT_INT32);
-    auto max_total_size =
-        ops::Placeholder(s.WithOpName("max_total_size"), DT_INT32);
-    auto iou_threshold =
-        ops::Placeholder(s.WithOpName("iou_threshold"), tf_type);
-    auto score_threshold =
-        ops::Placeholder(s.WithOpName("score_threshold"), tf_type);
-    auto nms_attrs = ops::CombinedNonMaxSuppression::Attrs()
-                         .PadPerClass(pad_per_class)
-                         .ClipBoxes(clip_boxes);
-
-    auto nms_op = ops::CombinedNonMaxSuppression(
-        s.WithOpName("my_nms"), boxes_tensor, scores_tensor,
-        max_output_size_per_class, max_total_size, iou_threshold,
-        score_threshold, nms_attrs);
-    return nms_op.operation.node()->def();
-  };
-
-  struct TestParams {
-    const std::string description;
-    const std::vector<int32> boxes_tensor_dims;
-    const std::vector<int32> scores_tensor_dims;
-    const std::vector<float> boxes_values;
-    const std::vector<float> scores_values;
-    const int32 max_output_size_per_class;
-    const int32 max_total_size;
-    const float iou_threshold;
-    const float score_threshold;
-    bool pad_per_class;
-    bool clip_boxes;
-    const std::vector<std::vector<int32>> expected_output_dims;
-    const std::vector<float> exp_boxes;
-    const std::vector<float> exp_scores;
-    const std::vector<float> exp_classes;
-    const std::vector<float> exp_num_detections;
-    Status conversion_status;
-    Status runtime_status;
-  };
-
+#else  // IS_TRT_VERSION_GE(7, 1, 3, 0)
   Status conv_status =
       trt_mode_ == TrtTestMode::kDynamicShape
           ? errors::Unimplemented(
@@ -4729,6 +4654,7 @@ TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
                            "loss of accuracy.")
                      : conv_status},
   };
+#endif
 
   for (auto p : params) {
     Reset();
@@ -4755,8 +4681,7 @@ TEST_P(OpConverter_FP32_Test, ConvertCombinedNMS) {
                             {tf_type_, tf_type_, tf_type_, DT_INT32});
   }
 }
-
-#endif  // IS_TRT_VERSION_GE(7, 1, 3, 0)
+#endif
 
 template <typename T>
 NodeDef CreateUnaryOp(DataType tf_type) {
